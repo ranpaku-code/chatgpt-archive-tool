@@ -1,0 +1,63 @@
+{
+  "categories": [
+    {
+      "name": "Code",
+      "priority": 100,
+      "keywords": [
+        "python",
+        "javascript",
+        "typescript",
+        "sql",
+        "api",
+        "git",
+        "docker",
+        "bug",
+        "error",
+        "code",
+        "implementation"
+      ]
+    },
+    {
+      "name": "Writing",
+      "priority": 90,
+      "keywords": [
+        "article",
+        "blog",
+        "summary",
+        "translate",
+        "email",
+        "writing",
+        "document",
+        "markdown"
+      ]
+    },
+    {
+      "name": "Business",
+      "priority": 80,
+      "keywords": [
+        "plan",
+        "strategy",
+        "sales",
+        "market",
+        "analysis",
+        "kpi",
+        "business",
+        "revenue"
+      ]
+    },
+    {
+      "name": "Study",
+      "priority": 70,
+      "keywords": [
+        "study",
+        "learn",
+        "english",
+        "math",
+        "exam",
+        "question",
+        "tutorial",
+        "practice"
+      ]
+    }
+  ]
+}
