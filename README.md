@@ -1,4 +1,4 @@
-# Chat Archive Tool
+# ChatGPT Archive Tool
 
 ChatGPT official export ZIP (or extracted folder) to local searchable archive:
 
