@@ -4,6 +4,7 @@ import datetime
 import html
 import json
 import pathlib
+import re
 import zipfile
 from typing import Any
 
@@ -11,6 +12,8 @@ OUT_CSV = "chat_archive.csv"
 OUT_HTML = "chat_archive.html"
 DETAIL_DIR = "chat_pages"
 RULE_FILE_NAME = "category_rules.json"
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac"}
 
 DEFAULT_CATEGORY_RULES = [
     {
@@ -183,6 +186,34 @@ def load_project_map(base_dir: pathlib.Path) -> dict[str, str]:
     return mapping
 
 
+def load_assets_map(base_dir: pathlib.Path) -> dict[str, list[str]]:
+    chat_html = base_dir / "chat.html"
+    if not chat_html.exists():
+        return {}
+    text = chat_html.read_text(encoding="utf-8", errors="ignore")
+    m = re.search(r"var\s+assetsJson\s*=\s*", text)
+    if not m:
+        return {}
+    start = text.find("{", m.end())
+    if start < 0:
+        return {}
+    decoder = json.JSONDecoder()
+    try:
+        raw_obj, _ = decoder.raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(raw_obj, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for key, value in raw_obj.items():
+        if not isinstance(value, list):
+            continue
+        paths = [str(v).replace("\\", "/") for v in value if isinstance(v, str) and v.strip()]
+        if paths:
+            out[str(key)] = paths
+    return out
+
+
 def extract_project_name(conv: dict[str, Any], project_map: dict[str, str]) -> str:
     for key in ("project_name", "projectName"):
         value = conv.get(key)
@@ -213,12 +244,12 @@ def extract_text_from_parts(parts: Any) -> str:
     return "\n".join(texts).strip()
 
 
-def build_message_rows(conv: dict[str, Any]) -> list[tuple[float, str, str]]:
+def build_message_rows(conv: dict[str, Any], assets_map: dict[str, list[str]]) -> list[dict[str, Any]]:
     mapping = conv.get("mapping", {})
     if not isinstance(mapping, dict):
         return []
-    messages: list[tuple[float, str, str]] = []
-    for node in mapping.values():
+    messages: list[dict[str, Any]] = []
+    for node_id, node in mapping.items():
         if not isinstance(node, dict):
             continue
         message = node.get("message")
@@ -227,23 +258,79 @@ def build_message_rows(conv: dict[str, Any]) -> list[tuple[float, str, str]]:
         content = message.get("content", {})
         parts = content.get("parts", []) if isinstance(content, dict) else []
         text = extract_text_from_parts(parts)
-        if not text:
+        message_id = str(message.get("id") or node.get("id") or node_id)
+        assets = assets_map.get(message_id, [])
+        if not text and not assets:
             continue
         author = message.get("author", {})
         role = author.get("role", "") if isinstance(author, dict) else ""
         create_time = message.get("create_time") or conv.get("update_time") or conv.get("create_time") or 0
-        messages.append((float(create_time), str(role), text))
-    messages.sort(key=lambda item: item[0])
+        messages.append(
+            {
+                "ts": float(create_time),
+                "role": str(role),
+                "text": text,
+                "id": message_id,
+                "assets": assets,
+            }
+        )
+    messages.sort(key=lambda item: float(item["ts"]))
     return messages
 
 
-def write_detail_page(out_path: pathlib.Path, title: str, messages: list[tuple[float, str, str]]) -> None:
+def build_attachment_html(out_path: pathlib.Path, assets: list[str]) -> str:
+    if not assets:
+        return ""
     blocks: list[str] = []
-    for ts, role, text in messages:
+    base_dir = out_path.parent.parent
+    for rel in assets:
+        rel_norm = rel.replace("\\", "/").lstrip("./")
+        ext = pathlib.Path(rel_norm).suffix.lower()
+        href = "../" + rel_norm
+        abs_path = base_dir / pathlib.Path(rel_norm)
+        missing = " missing" if not abs_path.exists() else ""
+        label = html.escape(rel_norm)
+        href_esc = html.escape(href)
+        if ext in IMAGE_EXTS:
+            blocks.append(
+                "<div class='att image'>"
+                f"<a href='{href_esc}' target='_blank'>"
+                f"<img src='{href_esc}' alt='{label}' loading='lazy'>"
+                "</a>"
+                f"<div class='att-name{missing}'>{label}</div>"
+                "</div>"
+            )
+        elif ext in AUDIO_EXTS:
+            blocks.append(
+                "<div class='att audio'>"
+                f"<audio controls preload='none' src='{href_esc}'></audio>"
+                f"<div class='att-name{missing}'><a href='{href_esc}' target='_blank'>{label}</a></div>"
+                "</div>"
+            )
+        else:
+            blocks.append(
+                "<div class='att file'>"
+                f"<a href='{href_esc}' target='_blank'>{label}</a>"
+                f"<span class='att-name{missing}'></span>"
+                "</div>"
+            )
+    return "<div class='atts'>" + "".join(blocks) + "</div>"
+
+
+def write_detail_page(out_path: pathlib.Path, title: str, messages: list[dict[str, Any]]) -> None:
+    blocks: list[str] = []
+    for msg in messages:
+        ts = float(msg["ts"])
+        role = str(msg["role"])
+        text = str(msg["text"])
+        assets = msg.get("assets") or []
+        attachments = build_attachment_html(out_path, assets)
+        text_html = f"<pre>{html.escape(text)}</pre>" if text else "<pre class='empty'>(No text)</pre>"
         blocks.append(
             "<div class='msg'>"
             f"<div class='meta'>{html.escape(ts_to_iso(ts))} | {html.escape(role)}</div>"
-            f"<pre>{html.escape(text)}</pre>"
+            f"{text_html}"
+            f"{attachments}"
             "</div>"
         )
     body = "\n".join(blocks) if blocks else "<p>(No visible text message)</p>"
@@ -259,6 +346,12 @@ h1{{font-size:20px}}
 pre{{white-space:pre-wrap;word-break:break-word;margin:0;font-family:inherit}}
 a{{color:#0366d6}}
 .hit{{border-color:#ff8a00;background:#fff4e8}}
+.empty{{color:#888}}
+.atts{{margin-top:8px;display:grid;gap:8px}}
+.att img{{max-width:100%;height:auto;border:1px solid #ddd;border-radius:6px}}
+.att audio{{width:100%}}
+.att-name{{font-size:12px;color:#444;margin-top:4px;word-break:break-all}}
+.att-name.missing{{color:#a00;font-weight:600}}
 </style>
 <h1>{html.escape(title)}</h1>
 <p><a href="../{OUT_HTML}">Back to archive index</a></p>
@@ -298,6 +391,7 @@ if(urlQ){{
 def build_archive(base_dir: pathlib.Path, rules: list[dict[str, Any]]) -> None:
     conversations = load_conversations(base_dir)
     project_map = load_project_map(base_dir)
+    assets_map = load_assets_map(base_dir)
     detail_dir = base_dir / DETAIL_DIR
     detail_dir.mkdir(parents=True, exist_ok=True)
 
@@ -305,8 +399,9 @@ def build_archive(base_dir: pathlib.Path, rules: list[dict[str, Any]]) -> None:
     for conv in conversations:
         title = str(conv.get("title") or "(no title)")
         conv_id = str(conv.get("conversation_id") or conv.get("id") or "")
-        messages = build_message_rows(conv)
-        full_text = "\n".join(m[2] for m in messages)
+        messages = build_message_rows(conv, assets_map)
+        full_text = "\n".join(str(m["text"]) for m in messages if m.get("text"))
+        media_count = sum(len(m.get("assets") or []) for m in messages)
         category = categorize((title + "\n" + full_text)[:4000], rules)
         project_name = extract_project_name(conv, project_map)
         dt = conv.get("update_time") or conv.get("create_time") or 0
@@ -321,6 +416,7 @@ def build_archive(base_dir: pathlib.Path, rules: list[dict[str, Any]]) -> None:
                 "project": project_name,
                 "title": title,
                 "message_count": len(messages),
+                "media_count": media_count,
                 "preview": (full_text[:200].replace("\n", " ") + "...") if full_text else "",
                 "conversation_id": conv_id,
                 "local_link": local_link,
@@ -336,6 +432,7 @@ def build_archive(base_dir: pathlib.Path, rules: list[dict[str, Any]]) -> None:
         "project",
         "title",
         "message_count",
+        "media_count",
         "preview",
         "conversation_id",
         "local_link",
@@ -362,6 +459,7 @@ def build_archive(base_dir: pathlib.Path, rules: list[dict[str, Any]]) -> None:
             f"<td>{html.escape(r['project'])}</td>"
             f"<td>{html.escape(r['title'])}</td>"
             f"<td>{r['message_count']}</td>"
+            f"<td>{r['media_count']}</td>"
             f"<td>{html.escape(r['preview'])}</td>"
             f"<td><a class='local-link' href='{html.escape(r['local_link'])}' target='_blank'>Open local</a></td>"
             f"<td>{web_link}</td>"
@@ -390,7 +488,7 @@ a{{color:#0366d6}}
 <table id="t">
 <thead>
 <tr>
-<th>DateTime</th><th>Category</th><th>Project</th><th>Title</th><th>Count</th><th>Preview</th><th>Local</th><th>Web</th>
+<th>DateTime</th><th>Category</th><th>Project</th><th>Title</th><th>Count</th><th>Media</th><th>Preview</th><th>Local</th><th>Web</th>
 </tr>
 </thead>
 <tbody>{table_rows}</tbody>
@@ -439,7 +537,7 @@ jumpBtn.onclick=()=>{{
   setTimeout(()=>target.style.outline='',1500);
 }};
 document.querySelectorAll('#t thead th').forEach((th,idx)=>th.onclick=()=>{{
-  if(idx>5) return;
+  if(idx>6) return;
   const tbody=document.querySelector('#t tbody');
   const sorted=[...tbody.querySelectorAll('tr')].sort((a,b)=>
     a.children[idx].innerText.localeCompare(b.children[idx].innerText,'en'));
